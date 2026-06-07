@@ -22,7 +22,17 @@ const commandsDir = path.join(__dirname, 'commands');
 
 for (const file of fs.readdirSync(commandsDir).filter(f => f.endsWith('.js'))) {
   const { data } = require(path.join(commandsDir, file));
-  commands.push(data.toJSON());
+  const json = data.toJSON();
+
+  console.log(
+    json.name,
+    json.options?.map(o => ({
+      name: o.name,
+      type: o.type
+    }))
+  );
+
+  commands.push(json);
 }
 
 const rest = new REST({ version: '10' }).setToken(token);
