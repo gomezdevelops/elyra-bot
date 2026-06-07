@@ -1,6 +1,4 @@
 // src/index.js
-// Entry point — initialises the Discord client, loads commands,
-// and wires up all event listeners.
 
 require('dotenv').config();
 
@@ -36,7 +34,8 @@ const client = new Client({
 // ─── Commands ─────────────────────────────────────────────────────────────────
 
 client.commands    = new Collection();
-client.activeDuels = new Map(); // channelId → gameState
+client.activeDuels = new Map(); // channelId → word duel gameState
+client.activeGames = new Map(); // channelId → reaction-race / scramble / number-snipe
 
 const commandsDir  = path.join(__dirname, 'commands');
 const commandFiles = fs.readdirSync(commandsDir).filter(f => f.endsWith('.js'));
@@ -48,10 +47,12 @@ for (const file of commandFiles) {
   commandData.push(command.data.toJSON());
 }
 
-// Grab duel word handler from the duel command module
-const duelModule = require('./commands/duel');
+// Grab module-level helpers
+const duelModule    = require('./commands/duel');
+const scrambleMod   = require('./commands/scramble');
 
-// ─── Message XP Cooldown Store ────────────────────────────────────────────────
+// ─── Message XP Cooldown ──────────────────────────────────────────────────────
+
 const messageCooldowns = new Map();
 
 // ─── Ready ────────────────────────────────────────────────────────────────────
@@ -59,7 +60,7 @@ const messageCooldowns = new Map();
 client.once(Events.ClientReady, async (readyClient) => {
   console.log(`✅  Logged in as ${readyClient.user.tag}`);
 
-  readyClient.user.setActivity('your duels ⚔️', { type: ActivityType.Watching });
+  readyClient.user.setActivity('games & duels ⚔️', { type: ActivityType.Watching });
 
   try {
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
@@ -87,7 +88,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await command.execute(interaction, client);
   } catch (err) {
     console.error(`[Command: ${interaction.commandName}]`, err);
-    const msg = { content: '❌ An error occurred executing this command.', ephemeral: true };
+    const msg = { content: '❌ An error occurred.', ephemeral: true };
     if (interaction.replied || interaction.deferred) {
       await interaction.followUp(msg).catch(() => {});
     } else {
@@ -102,77 +103,101 @@ client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot || !message.guild || !message.member) return;
 
   const channelId = message.channel.id;
+  const userId    = message.author.id;
+  const content   = message.content.trim();
 
-  // ── Duel word processing (takes priority over XP) ──────────────────────
-  const gameState = client.activeDuels.get(channelId);
-  if (gameState && gameState.active) {
-    const word   = message.content.trim().toLowerCase();
-    const userId = message.author.id;
+  // ── 1. Word Duel (takes highest priority) ──────────────────────────────
+  const duelState = client.activeDuels.get(channelId);
+  if (duelState && duelState.active) {
+    const word = content.toLowerCase();
 
-    // Only process single words (no spaces)
     if (/^[a-z]+$/.test(word)) {
-      const result = duelModule.handleDuelWord(gameState, userId, word);
+      const result = duelModule.handleDuelWord(duelState, userId, word);
 
       if (result === 'valid') {
-        const pts = word.length;
-        const totalWords = gameState.wordCounts[userId];
-        const totalScore = gameState.scores[userId];
-
-        // React with a checkmark to the message
         await message.react('✅').catch(() => {});
 
-        // Update the game message with live scores
-        if (gameState.gameMsg) {
-          const chalScore = gameState.scores[gameState.challenger] || 0;
-          const oppScore  = gameState.scores[gameState.opponent]   || 0;
-          const chalWords = gameState.wordCounts[gameState.challenger] || 0;
-          const oppWords  = gameState.wordCounts[gameState.opponent]   || 0;
-          const elapsed   = Date.now() - gameState.startedAt;
-          const remaining = Math.max(0, Math.round((30000 - elapsed) / 1000));
+        if (duelState.gameMsg) {
+          const chalScore  = duelState.scores[duelState.challenger] || 0;
+          const oppScore   = duelState.scores[duelState.opponent]   || 0;
+          const chalWords  = duelState.wordCounts[duelState.challenger] || 0;
+          const oppWords   = duelState.wordCounts[duelState.opponent]   || 0;
+          const elapsed    = Date.now() - duelState.startedAt;
+          const remaining  = Math.max(0, Math.round((30000 - elapsed) / 1000));
+          const letterDisp = duelState.letters.map(l => `**${l.toUpperCase()}**`).join('  ');
 
-          const letterDisplay = gameState.letters.map(l => `**${l.toUpperCase()}**`).join('  ');
-
-          gameState.gameMsg.edit({
-            embeds: [
-              {
-                color: 0x5B8FFF,
-                title: '🔤 Word Duel — IN PROGRESS',
-                description: `**Your letters:**\n\n${letterDisplay}\n\n⏱️ **${remaining}s remaining**`,
-                fields: [
-                  { name: '🗡️ Challenger', value: `<@${gameState.challenger}>\n${chalWords} words · **${chalScore} pts**`, inline: true },
-                  { name: '🛡️ Opponent',   value: `<@${gameState.opponent}>\n${oppWords} words · **${oppScore} pts**`,     inline: true },
-                ],
-                footer: { text: `⚔️ Wager: ${gameState.wager.toLocaleString()} XP · Last word: "${word}" (+${pts} pts)` },
-                timestamp: new Date().toISOString(),
-              },
-            ],
+          duelState.gameMsg.edit({
+            embeds: [{
+              color: 0x5B8FFF,
+              title: '🔤 Word Duel — IN PROGRESS',
+              description: `**Your letters:**\n\n${letterDisp}\n\n⏱️ **${remaining}s remaining**`,
+              fields: [
+                { name: '🗡️ Challenger', value: `<@${duelState.challenger}>\n${chalWords} words · **${chalScore} pts**`, inline: true },
+                { name: '🛡️ Opponent',   value: `<@${duelState.opponent}>\n${oppWords} words · **${oppScore} pts**`,     inline: true },
+              ],
+              footer: { text: `⚔️ Wager: ${duelState.wager.toLocaleString()} XP · Last: "${word}" (+${word.length} pts)` },
+              timestamp: new Date().toISOString(),
+            }],
           }).catch(() => {});
         }
 
       } else if (result === 'already_claimed') {
-        // React with ❌ — word already taken
         await message.react('❌').catch(() => {});
-
-      } else if (result === 'invalid') {
-        // No reaction for invalid — avoids spamming reactions on random chat
-        // Only react if the message author is one of the players
-        if (userId === gameState.challenger || userId === gameState.opponent) {
-          await message.react('🚫').catch(() => {});
-        }
+      } else if (result === 'invalid' && (userId === duelState.challenger || userId === duelState.opponent)) {
+        await message.react('🚫').catch(() => {});
       }
     }
-
-    return; // Don't award normal XP during an active duel
+    return; // never award XP during a word duel
   }
 
-  // ── Normal message XP ───────────────────────────────────────────────────
+  // ── 2. Active Game in channel (reaction race / scramble) ───────────────
+  const gameState = client.activeGames.get(channelId);
+  if (gameState && gameState.active) {
+
+    // ── Reaction Race ─────────────────────────────────────────────────
+    if (gameState.type === 'reaction-race') {
+      // Compare raw content (emojis) to the sequence
+      const typed = content;
+      if (typed === gameState.sequence) {
+        gameState.active = false;
+        client.activeGames.delete(channelId);
+
+        const member = message.member;
+        db.addXp(userId, message.guild.id, gameState.reward);
+
+        await message.react('⚡').catch(() => {});
+        await message.channel.send({
+          embeds: [
+            {
+              color: 0xFFD700,
+              title: '⚡ Reaction Race — Winner!',
+              description:
+                `🏆 **${member.displayName}** typed it first and wins **${gameState.reward.toLocaleString()} XP**!\n\n` +
+                `The sequence was: ${gameState.sequence}`,
+              timestamp: new Date().toISOString(),
+            },
+          ],
+        }).catch(() => {});
+      }
+      return; // don't award normal XP during race
+    }
+
+    // ── Scramble ──────────────────────────────────────────────────────
+    if (gameState.type === 'scramble-solo' || gameState.type === 'scramble-duel') {
+      await scrambleMod.handleScrambleMessage(gameState, userId, content, message.channel, client);
+      return; // don't award normal XP during scramble
+    }
+
+    return;
+  }
+
+  // ── 3. Normal message XP ───────────────────────────────────────────────
   const config = db.getGuildConfig(message.guild.id);
-  const key    = `${message.author.id}-${message.guild.id}`;
+  const key    = `${userId}-${message.guild.id}`;
   const now    = Date.now();
   const last   = messageCooldowns.get(key) ?? 0;
 
   if (now - last < config.message_cooldown_ms) return;
-
   messageCooldowns.set(key, now);
 
   const xpAmount = randomInt(config.message_xp_min, config.message_xp_max);
@@ -189,21 +214,15 @@ client.on(Events.VoiceStateUpdate, (oldState, newState) => {
   const afkId      = newState.guild.afkChannelId;
 
   if (!wasInVoice && isInVoice) {
-    if (!isMutedOrDeafened(newState) && newState.channelId !== afkId)
-      db.startVoiceSession(userId, guildId);
+    if (!isMuted(newState) && newState.channelId !== afkId) db.startVoiceSession(userId, guildId);
     return;
   }
-
-  if (wasInVoice && !isInVoice) {
-    db.endVoiceSession(userId, guildId);
-    return;
-  }
-
+  if (wasInVoice && !isInVoice) { db.endVoiceSession(userId, guildId); return; }
   if (wasInVoice && isInVoice) {
-    const wasEligible = !isMutedOrDeafened(oldState) && oldState.channelId !== afkId;
-    const isEligible  = !isMutedOrDeafened(newState) && newState.channelId !== afkId;
-    if (wasEligible && !isEligible) db.endVoiceSession(userId, guildId);
-    else if (!wasEligible && isEligible) db.startVoiceSession(userId, guildId);
+    const wasOk = !isMuted(oldState) && oldState.channelId !== afkId;
+    const isOk  = !isMuted(newState) && newState.channelId !== afkId;
+    if (wasOk && !isOk)  db.endVoiceSession(userId, guildId);
+    if (!wasOk && isOk)  db.startVoiceSession(userId, guildId);
   }
 });
 
@@ -211,45 +230,32 @@ client.on(Events.VoiceStateUpdate, (oldState, newState) => {
 
 async function voiceTick() {
   const sessions = db.getAllVoiceSessions();
-
   for (const session of sessions) {
     try {
       const guild = client.guilds.cache.get(session.guild_id);
       if (!guild) continue;
-
       const config = db.getGuildConfig(session.guild_id);
       const member = await guild.members.fetch(session.user_id).catch(() => null);
-
       if (!member) { db.endVoiceSession(session.user_id, session.guild_id); continue; }
-
-      const vs  = member.voice;
-      const afk = guild.afkChannelId;
-
-      if (!vs.channelId || isMutedOrDeafened(vs) || vs.channelId === afk) {
+      const vs = member.voice;
+      if (!vs.channelId || isMuted(vs) || vs.channelId === guild.afkChannelId) {
         db.endVoiceSession(session.user_id, session.guild_id);
         continue;
       }
-
       await awardXp(member, config.voice_xp_per_min, null);
     } catch (err) {
-      console.error('[Voice Tick] Error:', session, err);
+      console.error('[Voice Tick]', err);
     }
   }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function randomInt(min, max) {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
-}
-
-function isMutedOrDeafened(vs) {
-  return vs.selfMute || vs.selfDeaf || vs.serverMute || vs.serverDeaf;
-}
+function randomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+function isMuted(vs) { return vs.selfMute || vs.selfDeaf || vs.serverMute || vs.serverDeaf; }
 
 // ─── Login ────────────────────────────────────────────────────────────────────
 
 const token = process.env.DISCORD_TOKEN;
 if (!token) { console.error('❌  DISCORD_TOKEN not set.'); process.exit(1); }
-
 client.login(token);
