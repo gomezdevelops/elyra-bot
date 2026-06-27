@@ -57,14 +57,15 @@ db.exec(`
   );
 
   CREATE TABLE IF NOT EXISTS guild_config (
-    guild_id            TEXT PRIMARY KEY,
-    levelup_channel_id  TEXT DEFAULT NULL,
-    xp_multiplier       REAL DEFAULT 1.0,
-    duel_cooldown_ms    INTEGER DEFAULT 300000,
-    voice_xp_per_min    INTEGER DEFAULT 10,
-    message_xp_min      INTEGER DEFAULT 15,
-    message_xp_max      INTEGER DEFAULT 25,
-    message_cooldown_ms INTEGER DEFAULT 60000
+    guild_id                TEXT PRIMARY KEY,
+    levelup_channel_id      TEXT DEFAULT NULL,
+    achievements_channel_id TEXT DEFAULT NULL,
+    xp_multiplier           REAL DEFAULT 1.0,
+    duel_cooldown_ms        INTEGER DEFAULT 300000,
+    voice_xp_per_min        INTEGER DEFAULT 10,
+    message_xp_min          INTEGER DEFAULT 15,
+    message_xp_max          INTEGER DEFAULT 25,
+    message_cooldown_ms     INTEGER DEFAULT 60000
   );
 
   CREATE TABLE IF NOT EXISTS shop_items (
@@ -98,6 +99,7 @@ db.exec(`
 const migrations = [
   "ALTER TABLE users ADD COLUMN last_fish INTEGER DEFAULT 0",
   "ALTER TABLE users ADD COLUMN last_rob  INTEGER DEFAULT 0",
+  "ALTER TABLE guild_config ADD COLUMN achievements_channel_id TEXT DEFAULT NULL",
 ];
 for (const sql of migrations) {
   try { db.exec(sql); } catch (_) { /* column already exists — safe to ignore */ }
@@ -161,18 +163,19 @@ const stmts = {
   // Guild Config
   getGuildConfig: db.prepare('SELECT * FROM guild_config WHERE guild_id = ?'),
   upsertGuildConfig: db.prepare(`
-    INSERT INTO guild_config (guild_id, levelup_channel_id, xp_multiplier, duel_cooldown_ms,
+    INSERT INTO guild_config (guild_id, levelup_channel_id, achievements_channel_id, xp_multiplier, duel_cooldown_ms,
       voice_xp_per_min, message_xp_min, message_xp_max, message_cooldown_ms)
-    VALUES (@guild_id, @levelup_channel_id, @xp_multiplier, @duel_cooldown_ms,
+    VALUES (@guild_id, @levelup_channel_id, @achievements_channel_id, @xp_multiplier, @duel_cooldown_ms,
       @voice_xp_per_min, @message_xp_min, @message_xp_max, @message_cooldown_ms)
     ON CONFLICT(guild_id) DO UPDATE SET
-      levelup_channel_id  = COALESCE(excluded.levelup_channel_id, levelup_channel_id),
-      xp_multiplier       = excluded.xp_multiplier,
-      duel_cooldown_ms    = excluded.duel_cooldown_ms,
-      voice_xp_per_min    = excluded.voice_xp_per_min,
-      message_xp_min      = excluded.message_xp_min,
-      message_xp_max      = excluded.message_xp_max,
-      message_cooldown_ms = excluded.message_cooldown_ms
+      levelup_channel_id      = COALESCE(excluded.levelup_channel_id, levelup_channel_id),
+      achievements_channel_id = COALESCE(excluded.achievements_channel_id, achievements_channel_id),
+      xp_multiplier           = excluded.xp_multiplier,
+      duel_cooldown_ms        = excluded.duel_cooldown_ms,
+      voice_xp_per_min        = excluded.voice_xp_per_min,
+      message_xp_min          = excluded.message_xp_min,
+      message_xp_max          = excluded.message_xp_max,
+      message_cooldown_ms     = excluded.message_cooldown_ms
   `),
   // Duels
   createDuel: db.prepare(`
@@ -341,13 +344,14 @@ function getUserRank(userId, guildId) {
 // ─── Guild Config ─────────────────────────────────────────────────────────────
 
 const DEFAULT_CONFIG = {
-  levelup_channel_id:  null,
-  xp_multiplier:       1.0,
-  duel_cooldown_ms:    300_000,
-  voice_xp_per_min:    10,
-  message_xp_min:      15,
-  message_xp_max:      25,
-  message_cooldown_ms: 60_000,
+  levelup_channel_id:      null,
+  achievements_channel_id: null,
+  xp_multiplier:           1.0,
+  duel_cooldown_ms:        300_000,
+  voice_xp_per_min:        10,
+  message_xp_min:          15,
+  message_xp_max:          25,
+  message_cooldown_ms:     60_000,
 };
 
 function getGuildConfig(guildId) {

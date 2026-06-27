@@ -1,13 +1,86 @@
 // src/commands/achievements.js
-// Shows all achievements — unlocked (with date) and locked (with progress bar).
+// Paginated achievements viewer — one tier per page, navigated with buttons.
 
-const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const {
+  SlashCommandBuilder,
+  EmbedBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ActionRowBuilder,
+  ComponentType,
+} = require('discord.js');
 const db = require('../database');
 const { ACHIEVEMENTS, TIER_COLORS, TIER_ORDER, getUserAchievementSummary } = require('../utils/achievements');
+
+const PAGE_TIMEOUT = 120_000; // 2 minutes of inactivity before buttons disable
 
 function buildMiniBar(current, target, length = 10) {
   const filled = Math.round((current / target) * length);
   return '▰'.repeat(Math.max(0, Math.min(length, filled))) + '▱'.repeat(Math.max(0, length - filled));
+}
+
+function tierIcon(tier) {
+  const icons = { Bronze: '🥉', Silver: '🥈', Gold: '🥇', Platinum: '💠' };
+  return icons[tier] || '🎖️';
+}
+
+/**
+ * Build the embed for a single tier page.
+ */
+function buildTierEmbed(tier, target, userData, unlockedIds, pageIndex, totalPages, unlockedCount, totalAch) {
+  const tierAchievements = ACHIEVEMENTS.filter(a => a.tier === tier);
+
+  const lines = tierAchievements.map(ach => {
+    const isUnlocked = unlockedIds.has(ach.id);
+
+    if (isUnlocked) {
+      return `✅ ${ach.emoji} **${ach.name}** — *${ach.desc}*`;
+    }
+
+    if (ach.progress) {
+      const { current, target: t } = ach.progress(userData);
+      const bar = buildMiniBar(current, t, 10);
+      return `🔒 ${ach.emoji} **${ach.name}** — *${ach.desc}*\n　 \`${bar}\` ${current.toLocaleString()}/${t.toLocaleString()}`;
+    }
+
+    return `🔒 ${ach.emoji} **${ach.name}** — *${ach.desc}*`;
+  });
+
+  const tierUnlockedCount = tierAchievements.filter(a => unlockedIds.has(a.id)).length;
+
+  return new EmbedBuilder()
+    .setColor(TIER_COLORS[tier])
+    .setAuthor({
+      name:    `${target.username}'s Achievements`,
+      iconURL: target.displayAvatarURL({ dynamic: true }),
+    })
+    .setTitle(`${tierIcon(tier)} ${tier} Tier  ·  ${tierUnlockedCount}/${tierAchievements.length}`)
+    .setDescription(lines.join('\n\n'))
+    .setFooter({
+      text: `Page ${pageIndex + 1}/${totalPages} · Overall: ${unlockedCount}/${totalAch} unlocked`,
+    });
+}
+
+function buildButtons(pageIndex, totalPages, disabled = false) {
+  const prevBtn = new ButtonBuilder()
+    .setCustomId('ach-prev')
+    .setEmoji('◀️')
+    .setStyle(ButtonStyle.Secondary)
+    .setDisabled(disabled || pageIndex === 0);
+
+  const nextBtn = new ButtonBuilder()
+    .setCustomId('ach-next')
+    .setEmoji('▶️')
+    .setStyle(ButtonStyle.Secondary)
+    .setDisabled(disabled || pageIndex === totalPages - 1);
+
+  const pageIndicator = new ButtonBuilder()
+    .setCustomId('ach-page')
+    .setLabel(`${pageIndex + 1} / ${totalPages}`)
+    .setStyle(ButtonStyle.Secondary)
+    .setDisabled(true);
+
+  return new ActionRowBuilder().addComponents(prevBtn, pageIndicator, nextBtn);
 }
 
 module.exports = {
@@ -23,65 +96,52 @@ module.exports = {
     const guildId = interaction.guildId;
     const userData = db.getUser(target.id, guildId);
 
-    const { unlocked, locked, total, unlockedCount } = getUserAchievementSummary(target.id, guildId);
+    const { unlocked, total, unlockedCount } = getUserAchievementSummary(target.id, guildId);
     const unlockedIds = new Set(unlocked.map(a => a.id));
 
-    // Group all achievements by tier, in order, marking unlocked status
-    const embeds = [];
-
-    const overallPct = Math.floor((unlockedCount / total) * 100);
-    const overviewBar = buildMiniBar(unlockedCount, total, 20);
-
-    embeds.push(
-      new EmbedBuilder()
-        .setColor(0xFFD700)
-        .setAuthor({
-          name:    `${target.username}'s Achievements`,
-          iconURL: target.displayAvatarURL({ dynamic: true }),
-        })
-        .setDescription(
-          `**${unlockedCount} / ${total}** achievements unlocked (${overallPct}%)\n` +
-          `\`${overviewBar}\``
-        )
-        .setTimestamp()
+    // Only include tiers that actually have achievements defined
+    const tiersWithContent = TIER_ORDER.filter(tier =>
+      ACHIEVEMENTS.some(a => a.tier === tier)
     );
+    const totalPages = tiersWithContent.length;
 
-    for (const tier of TIER_ORDER) {
-      const tierAchievements = ACHIEVEMENTS.filter(a => a.tier === tier);
-      if (!tierAchievements.length) continue;
+    let pageIndex = 0; // start on first tier (Bronze)
 
-      const lines = tierAchievements.map(ach => {
-        const isUnlocked = unlockedIds.has(ach.id);
+    const embed = buildTierEmbed(
+      tiersWithContent[pageIndex], target, userData, unlockedIds,
+      pageIndex, totalPages, unlockedCount, total
+    );
+    const row = buildButtons(pageIndex, totalPages);
 
-        if (isUnlocked) {
-          const unlockedData = unlocked.find(a => a.id === ach.id);
-          return `✅ ${ach.emoji} **${ach.name}** — *${ach.desc}*`;
-        }
+    const message = await interaction.editReply({ embeds: [embed], components: [row] });
 
-        // Locked — show progress if available
-        if (ach.progress) {
-          const { current, target: t } = ach.progress(userData);
-          const bar = buildMiniBar(current, t, 10);
-          return `🔒 ${ach.emoji} **${ach.name}** — *${ach.desc}*\n　 \`${bar}\` ${current.toLocaleString()}/${t.toLocaleString()}`;
-        }
+    // ── Button collector ────────────────────────────────────────────────────
+    const collector = message.createMessageComponentCollector({
+      componentType: ComponentType.Button,
+      time: PAGE_TIMEOUT,
+    });
 
-        return `🔒 ${ach.emoji} **${ach.name}** — *${ach.desc}*`;
-      });
+    collector.on('collect', async (btn) => {
+      // Only the person who ran the command can navigate
+      if (btn.user.id !== interaction.user.id) {
+        return btn.reply({ content: "❌ Only the person who ran this command can navigate.", ephemeral: true });
+      }
 
-      embeds.push(
-        new EmbedBuilder()
-          .setColor(TIER_COLORS[tier])
-          .setTitle(`${tierIcon(tier)} ${tier} Tier`)
-          .setDescription(lines.join('\n\n'))
+      if (btn.customId === 'ach-prev' && pageIndex > 0) pageIndex--;
+      if (btn.customId === 'ach-next' && pageIndex < totalPages - 1) pageIndex++;
+
+      const newEmbed = buildTierEmbed(
+        tiersWithContent[pageIndex], target, userData, unlockedIds,
+        pageIndex, totalPages, unlockedCount, total
       );
-    }
+      const newRow = buildButtons(pageIndex, totalPages);
 
-    // Discord allows max 10 embeds per message — we have 1 (overview) + up to 4 (tiers) = 5, safe
-    await interaction.editReply({ embeds });
+      await btn.update({ embeds: [newEmbed], components: [newRow] });
+    });
+
+    collector.on('end', async () => {
+      const disabledRow = buildButtons(pageIndex, totalPages, true);
+      await message.edit({ components: [disabledRow] }).catch(() => {});
+    });
   },
 };
-
-function tierIcon(tier) {
-  const icons = { Bronze: '🥉', Silver: '🥈', Gold: '🥇', Platinum: '💠' };
-  return icons[tier] || '🎖️';
-}

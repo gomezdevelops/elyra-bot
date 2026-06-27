@@ -5,6 +5,7 @@ const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const db = require('../database');
 const { getLevelColor } = require('../utils/xpHandler');
 const { checkAndUnlock, TIER_COLORS } = require('../utils/achievements');
+const { resolveAchievementsChannel } = require('../utils/xpHandler');
 
 const DUEL_EXPIRE_MS  = 5 * 60_000; // 5 min to accept
 const GAME_DURATION   = 30_000;      // 30 seconds of play
@@ -413,19 +414,24 @@ async function endDuelGame(gameState, channel, client) {
     .setFooter({ text: `Scoring: 1 point per letter · ${xferText}` })
     .setTimestamp();
 
-  const embeds = [embed];
+  await channel.send({ embeds: [embed] }).catch(() => {});
 
-  for (const ach of newlyUnlocked) {
-    embeds.push(
-      new EmbedBuilder()
-        .setColor(TIER_COLORS[ach.tier] || 0xFFD700)
-        .setTitle('🎖️ Achievement Unlocked!')
-        .setDescription(`<@${winnerId}> just unlocked **${ach.emoji} ${ach.name}**!\n*${ach.desc}*`)
-        .setFooter({ text: `${ach.tier} Tier` })
-    );
+  // Send achievement unlock(s) to the dedicated achievements channel (falls back to duel channel)
+  if (newlyUnlocked.length) {
+    const achChannel = resolveAchievementsChannel(channel.guild) || channel;
+    for (const ach of newlyUnlocked) {
+      achChannel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(TIER_COLORS[ach.tier] || 0xFFD700)
+            .setTitle('🎖️ Achievement Unlocked!')
+            .setDescription(`<@${winnerId}> just unlocked **${ach.emoji} ${ach.name}**!\n*${ach.desc}*`)
+            .setFooter({ text: `${ach.tier} Tier · Use /achievements to see all` })
+            .setTimestamp(),
+        ],
+      }).catch(() => {});
+    }
   }
-
-  await channel.send({ embeds }).catch(() => {});
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }

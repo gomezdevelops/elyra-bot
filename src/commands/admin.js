@@ -46,6 +46,11 @@ module.exports = {
         .addChannelOption(o => o.setName('channel').setDescription('Announcement channel (leave blank to disable)').setRequired(false))
     )
     .addSubcommand(sub =>
+      sub.setName('set-achievements-channel')
+        .setDescription('Set the channel where achievement unlock announcements are sent.')
+        .addChannelOption(o => o.setName('channel').setDescription('Achievements channel (leave blank to disable)').setRequired(false))
+    )
+    .addSubcommand(sub =>
       sub.setName('set-multiplier')
         .setDescription('Set the XP multiplier for this server (e.g. 2.0 = double XP).')
         .addNumberOption(o =>
@@ -165,6 +170,21 @@ module.exports = {
       });
     }
 
+    // ── SET ACHIEVEMENTS CHANNEL ─────────────────────────────────────────────
+    if (sub === 'set-achievements-channel') {
+      const channel = interaction.options.getChannel('channel');
+      db.setGuildConfig(guildId, { achievements_channel_id: channel?.id ?? null });
+
+      return interaction.editReply({
+        embeds: [successEmbed(
+          'Achievements Channel Updated',
+          channel
+            ? `Achievement unlock announcements will now be sent only to ${channel}.`
+            : 'Achievement announcements will now appear in whichever channel triggered the unlock.'
+        )],
+      });
+    }
+
     // ── SET MULTIPLIER ──────────────────────────────────────────────────────
     if (sub === 'set-multiplier') {
       const mult = interaction.options.getNumber('multiplier');
@@ -218,6 +238,11 @@ module.exports = {
           {
             name: '📢 Level-Up Channel',
             value: config.levelup_channel_id ? `<#${config.levelup_channel_id}>` : 'Same channel as message',
+            inline: true,
+          },
+          {
+            name: '🎖️ Achievements Channel',
+            value: config.achievements_channel_id ? `<#${config.achievements_channel_id}>` : 'Same channel as trigger',
             inline: true,
           },
           { name: '✨ XP Multiplier',   value: `×${config.xp_multiplier}`,                              inline: true },

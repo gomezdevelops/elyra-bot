@@ -18,10 +18,10 @@ async function awardXp(member, amount, channel = null) {
   // ── Achievement check (runs on every XP change, level-up or not) ───────────
   const newlyUnlocked = checkAndUnlock(member.id, member.guild.id);
   if (newlyUnlocked.length) {
-    const announceChannel = channel || resolveLevelupChannel(member);
-    if (announceChannel) {
+    const achChannel = resolveAchievementsChannel(member) || channel;
+    if (achChannel) {
       for (const ach of newlyUnlocked) {
-        announceChannel.send({
+        achChannel.send({
           embeds: [
             new EmbedBuilder()
               .setColor(TIER_COLORS[ach.tier] || 0xFFD700)
@@ -122,6 +122,15 @@ function resolveLevelupChannel(member) {
   return null;
 }
 
+function resolveAchievementsChannel(memberOrGuild) {
+  const guild  = memberOrGuild.guild || memberOrGuild; // accepts a GuildMember or a Guild directly
+  const config = db.getGuildConfig(guild.id);
+  if (config.achievements_channel_id) {
+    return guild.channels.cache.get(config.achievements_channel_id) || null;
+  }
+  return null;
+}
+
 function getLevelColor(level) {
   if (level >= 50) return 0xFF0000; // Red — legendary
   if (level >= 30) return 0xFFD700; // Gold
@@ -131,4 +140,4 @@ function getLevelColor(level) {
   return 0x3498DB;                  // Blue
 }
 
-module.exports = { awardXp, getLevelColor };
+module.exports = { awardXp, getLevelColor, resolveAchievementsChannel };

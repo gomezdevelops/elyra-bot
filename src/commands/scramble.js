@@ -5,6 +5,7 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const db = require('../database');
 const { checkAndUnlock, TIER_COLORS } = require('../utils/achievements');
+const { resolveAchievementsChannel } = require('../utils/xpHandler');
 
 const ROUND_TIME  = 20_000; // 20s per round
 const SOLO_ROUNDS = 5;
@@ -354,7 +355,7 @@ async function endScramble(gameState, channel, client) {
   const oppScore  = scores[opponent]   || 0;
   const isTie     = chalScore === oppScore;
 
-  let desc, newlyUnlocked = [];
+  let desc, newlyUnlocked = [], winnerIdForAch = null;
   if (isTie) {
     desc = `🤝 **It's a tie!** Both scored **${chalScore} points**. No XP transferred.`;
   } else {
@@ -362,33 +363,41 @@ async function endScramble(gameState, channel, client) {
     const loserId  = winnerId === challenger ? opponent : challenger;
     const { actualWager } = db.recordDuelResult(guildId, winnerId, loserId, wager);
     desc = `🏆 **<@${winnerId}> wins!** They take **${actualWager.toLocaleString()} XP** from <@${loserId}>!`;
-    newlyUnlocked = checkAndUnlock(winnerId, guildId);
+    newlyUnlocked  = checkAndUnlock(winnerId, guildId);
+    winnerIdForAch = winnerId;
   }
 
-  const embeds = [
-    new EmbedBuilder()
-      .setColor(isTie ? 0x95A5A6 : 0xFFD700)
-      .setTitle('🔤 Scramble Duel Over!')
-      .setDescription(desc)
-      .addFields(
-        { name: `<@${challenger}>`, value: `**${chalScore} points**`, inline: true },
-        { name: `<@${opponent}>`,   value: `**${oppScore} points**`,  inline: true },
-      )
-      .setFooter({ text: `Wager: ${wager.toLocaleString()} XP` })
-      .setTimestamp(),
-  ];
-
-  for (const ach of newlyUnlocked) {
-    embeds.push(
+  await channel.send({
+    embeds: [
       new EmbedBuilder()
-        .setColor(TIER_COLORS[ach.tier] || 0xFFD700)
-        .setTitle('🎖️ Achievement Unlocked!')
-        .setDescription(`**${ach.emoji} ${ach.name}**\n*${ach.desc}*`)
-        .setFooter({ text: `${ach.tier} Tier` })
-    );
-  }
+        .setColor(isTie ? 0x95A5A6 : 0xFFD700)
+        .setTitle('🔤 Scramble Duel Over!')
+        .setDescription(desc)
+        .addFields(
+          { name: `<@${challenger}>`, value: `**${chalScore} points**`, inline: true },
+          { name: `<@${opponent}>`,   value: `**${oppScore} points**`,  inline: true },
+        )
+        .setFooter({ text: `Wager: ${wager.toLocaleString()} XP` })
+        .setTimestamp(),
+    ],
+  }).catch(() => {});
 
-  await channel.send({ embeds }).catch(() => {});
+  // Send achievement unlock(s) to the dedicated achievements channel (falls back to current channel)
+  if (newlyUnlocked.length) {
+    const achChannel = resolveAchievementsChannel(channel.guild) || channel;
+    for (const ach of newlyUnlocked) {
+      achChannel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(TIER_COLORS[ach.tier] || 0xFFD700)
+            .setTitle('🎖️ Achievement Unlocked!')
+            .setDescription(`<@${winnerIdForAch}> just unlocked **${ach.emoji} ${ach.name}**!\n*${ach.desc}*`)
+            .setFooter({ text: `${ach.tier} Tier · Use /achievements to see all` })
+            .setTimestamp(),
+        ],
+      }).catch(() => {});
+    }
+  }
 }
 
 // Export helpers for index.js
