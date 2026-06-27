@@ -4,6 +4,7 @@
 
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const db = require('../database');
+const { checkAndUnlock, TIER_COLORS } = require('../utils/achievements');
 
 const ROUND_TIME  = 20_000; // 20s per round
 const SOLO_ROUNDS = 5;
@@ -353,7 +354,7 @@ async function endScramble(gameState, channel, client) {
   const oppScore  = scores[opponent]   || 0;
   const isTie     = chalScore === oppScore;
 
-  let desc;
+  let desc, newlyUnlocked = [];
   if (isTie) {
     desc = `🤝 **It's a tie!** Both scored **${chalScore} points**. No XP transferred.`;
   } else {
@@ -361,22 +362,33 @@ async function endScramble(gameState, channel, client) {
     const loserId  = winnerId === challenger ? opponent : challenger;
     const { actualWager } = db.recordDuelResult(guildId, winnerId, loserId, wager);
     desc = `🏆 **<@${winnerId}> wins!** They take **${actualWager.toLocaleString()} XP** from <@${loserId}>!`;
+    newlyUnlocked = checkAndUnlock(winnerId, guildId);
   }
 
-  await channel.send({
-    embeds: [
+  const embeds = [
+    new EmbedBuilder()
+      .setColor(isTie ? 0x95A5A6 : 0xFFD700)
+      .setTitle('🔤 Scramble Duel Over!')
+      .setDescription(desc)
+      .addFields(
+        { name: `<@${challenger}>`, value: `**${chalScore} points**`, inline: true },
+        { name: `<@${opponent}>`,   value: `**${oppScore} points**`,  inline: true },
+      )
+      .setFooter({ text: `Wager: ${wager.toLocaleString()} XP` })
+      .setTimestamp(),
+  ];
+
+  for (const ach of newlyUnlocked) {
+    embeds.push(
       new EmbedBuilder()
-        .setColor(isTie ? 0x95A5A6 : 0xFFD700)
-        .setTitle('🔤 Scramble Duel Over!')
-        .setDescription(desc)
-        .addFields(
-          { name: `<@${challenger}>`, value: `**${chalScore} points**`, inline: true },
-          { name: `<@${opponent}>`,   value: `**${oppScore} points**`,  inline: true },
-        )
-        .setFooter({ text: `Wager: ${wager.toLocaleString()} XP` })
-        .setTimestamp(),
-    ],
-  }).catch(() => {});
+        .setColor(TIER_COLORS[ach.tier] || 0xFFD700)
+        .setTitle('🎖️ Achievement Unlocked!')
+        .setDescription(`**${ach.emoji} ${ach.name}**\n*${ach.desc}*`)
+        .setFooter({ text: `${ach.tier} Tier` })
+    );
+  }
+
+  await channel.send({ embeds }).catch(() => {});
 }
 
 // Export helpers for index.js

@@ -4,9 +4,10 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const db = require('../database');
 const { getLevelColor } = require('../utils/xpHandler');
+const { checkAndUnlock, TIER_COLORS } = require('../utils/achievements');
 
 const DUEL_EXPIRE_MS  = 5 * 60_000; // 5 min to accept
-const GAME_DURATION   = 45_000;      // 45 seconds of play
+const GAME_DURATION   = 30_000;      // 30 seconds of play
 const MIN_WORD_LENGTH = 3;
 
 module.exports = {
@@ -72,7 +73,7 @@ module.exports = {
               { name: '🗡️ Challenger', value: `<@${userId}>\nLv. ${challengerData.level} · ${challengerData.xp.toLocaleString()} XP`, inline: true },
               { name: '🛡️ Opponent',   value: `${opponent}\nLv. ${opponentData.level} · ${opponentData.xp.toLocaleString()} XP`, inline: true },
             )
-            .setFooter({ text: 'How it works: when accepted, you\'ll race to form the most words from a set of random letters in 45 seconds.' })
+            .setFooter({ text: 'How it works: when accepted, you\'ll race to form the most words from a set of random letters in 30 seconds.' })
             .setTimestamp(),
         ],
       });
@@ -133,7 +134,7 @@ module.exports = {
               `<@${duel.challenger}> vs <@${userId}>\n\n` +
               `The battle begins in **3 seconds...**\n\n` +
               `**Wager:** ${duel.wager.toLocaleString()} XP\n` +
-              `**Duration:** 45 seconds`
+              `**Duration:** 30 seconds`
             )
             .setFooter({ text: 'Form as many words as possible from the letters below. Min 3 letters. First to claim a word wins it.' })
             .setTimestamp(),
@@ -151,7 +152,7 @@ module.exports = {
             .setDescription(
               `**Your letters:**\n\n${letterDisplay}\n\n` +
               `Type words using only these letters in this channel!\n` +
-              `⏱️ **45 seconds on the clock.**`
+              `⏱️ **30 seconds on the clock.**`
             )
             .addFields(
               { name: '📜 Rules', value: '• Minimum **3 letters** per word\n• Each letter can only be used as many times as it appears\n• First to type a word claims it — duplicates don\'t count\n• Real English words only' },
@@ -166,7 +167,7 @@ module.exports = {
       gameState.gameMsg = gameMsg;
 
       // ── Countdown updates ───────────────────────────────────────────────
-      const tickTimes = [30000, 35000, 40000];; // ms after start to post warnings
+      const tickTimes = [20000, 10000, 5000]; // ms after start to post warnings
       for (const t of tickTimes) {
         setTimeout(async () => {
           if (!gameState.active) return;
@@ -177,7 +178,7 @@ module.exports = {
         }, t);
       }
 
-      // ── End game after 45s ──────────────────────────────────────────────
+      // ── End game after 30s ──────────────────────────────────────────────
       setTimeout(() => endDuelGame(gameState, channel, client), GAME_DURATION);
 
       return; // game is now live, index.js handles word messages
@@ -374,7 +375,7 @@ async function endDuelGame(gameState, channel, client) {
   const chalWords = Object.entries(claimedBy).filter(([,u]) => u === challenger).map(([w]) => w);
   const oppWords  = Object.entries(claimedBy).filter(([,u]) => u === opponent).map(([w]) => w);
 
-  let description, xferText;
+  let description, xferText, newlyUnlocked = [];
 
   if (isTie) {
     description = `🤝 **It's a tie!** Both players scored **${chalScore} points**. No XP is transferred.`;
@@ -385,6 +386,7 @@ async function endDuelGame(gameState, channel, client) {
     db.resolveDuel(duelId, winnerId);
     description = `🏆 **<@${winnerId}> wins the duel!** They take **${actualWager.toLocaleString()} XP** from <@${loserId}>!`;
     xferText = `${actualWager.toLocaleString()} XP transferred`;
+    newlyUnlocked = checkAndUnlock(winnerId, guildId);
   }
 
   const formatWords = (words) =>
@@ -411,7 +413,19 @@ async function endDuelGame(gameState, channel, client) {
     .setFooter({ text: `Scoring: 1 point per letter · ${xferText}` })
     .setTimestamp();
 
-  await channel.send({ embeds: [embed] }).catch(() => {});
+  const embeds = [embed];
+
+  for (const ach of newlyUnlocked) {
+    embeds.push(
+      new EmbedBuilder()
+        .setColor(TIER_COLORS[ach.tier] || 0xFFD700)
+        .setTitle('🎖️ Achievement Unlocked!')
+        .setDescription(`<@${winnerId}> just unlocked **${ach.emoji} ${ach.name}**!\n*${ach.desc}*`)
+        .setFooter({ text: `${ach.tier} Tier` })
+    );
+  }
+
+  await channel.send({ embeds }).catch(() => {});
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }

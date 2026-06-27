@@ -3,6 +3,7 @@
 
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const db = require('../database');
+const { checkAndUnlock, TIER_COLORS } = require('../utils/achievements');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -80,19 +81,32 @@ module.exports = {
 
       const { item, newXp } = result;
 
-      return interaction.editReply({
-        embeds: [
+      // Check for newly unlocked achievements (e.g. "first_title")
+      const newlyUnlocked = checkAndUnlock(userId, guildId);
+
+      const embeds = [
+        new EmbedBuilder()
+          .setColor(0x2ECC71)
+          .setTitle('✅ Purchase Successful!')
+          .setDescription(
+            `You bought **${item.name}** for **${item.cost.toLocaleString()} XP**!` +
+            (item.item_type === 'title' ? `\n\nYour new title: *"${item.item_value}"*` : '')
+          )
+          .addFields({ name: 'Remaining XP', value: `**${newXp.toLocaleString()}**`, inline: true })
+          .setTimestamp(),
+      ];
+
+      for (const ach of newlyUnlocked) {
+        embeds.push(
           new EmbedBuilder()
-            .setColor(0x2ECC71)
-            .setTitle('✅ Purchase Successful!')
-            .setDescription(
-              `You bought **${item.name}** for **${item.cost.toLocaleString()} XP**!` +
-              (item.item_type === 'title' ? `\n\nYour new title: *"${item.item_value}"*` : '')
-            )
-            .addFields({ name: 'Remaining XP', value: `**${newXp.toLocaleString()}**`, inline: true })
-            .setTimestamp(),
-        ],
-      });
+            .setColor(TIER_COLORS[ach.tier] || 0xFFD700)
+            .setTitle('🎖️ Achievement Unlocked!')
+            .setDescription(`**${ach.emoji} ${ach.name}**\n*${ach.desc}*`)
+            .setFooter({ text: `${ach.tier} Tier` })
+        );
+      }
+
+      return interaction.editReply({ embeds });
     }
   },
 };

@@ -24,6 +24,8 @@ db.exec(`
     duel_losses  INTEGER DEFAULT 0,
     last_daily   INTEGER DEFAULT 0,
     daily_streak INTEGER DEFAULT 0,
+    last_fish    INTEGER DEFAULT 0,
+    last_rob     INTEGER DEFAULT 0,
     PRIMARY KEY (user_id, guild_id)
   );
 
@@ -81,18 +83,35 @@ db.exec(`
     last_duel INTEGER NOT NULL,
     PRIMARY KEY (user_id, guild_id)
   );
+
+  CREATE TABLE IF NOT EXISTS user_achievements (
+    user_id        TEXT NOT NULL,
+    guild_id       TEXT NOT NULL,
+    achievement_id TEXT NOT NULL,
+    unlocked_at    INTEGER NOT NULL,
+    PRIMARY KEY (user_id, guild_id, achievement_id)
+  );
 `);
 
+// ─── Safe column migrations (won't fail on existing DBs) ─────────────────────
+// These add new columns to existing databases without losing any data.
+const migrations = [
+  "ALTER TABLE users ADD COLUMN last_fish INTEGER DEFAULT 0",
+  "ALTER TABLE users ADD COLUMN last_rob  INTEGER DEFAULT 0",
+];
+for (const sql of migrations) {
+  try { db.exec(sql); } catch (_) { /* column already exists — safe to ignore */ }
+}
+
 // ─── Prepared Statements ──────────────────────────────────────────────────────
-// node-sqlite3-wasm uses @param syntax in SQL, and requires '@param' keys in objects.
 
 const stmts = {
   getUser: db.prepare(
     'SELECT * FROM users WHERE user_id = ? AND guild_id = ?'
   ),
   upsertUser: db.prepare(`
-    INSERT INTO users (user_id, guild_id, xp, level, title, duel_wins, duel_losses, last_daily, daily_streak)
-    VALUES (@user_id, @guild_id, @xp, @level, @title, @duel_wins, @duel_losses, @last_daily, @daily_streak)
+    INSERT INTO users (user_id, guild_id, xp, level, title, duel_wins, duel_losses, last_daily, daily_streak, last_fish, last_rob)
+    VALUES (@user_id, @guild_id, @xp, @level, @title, @duel_wins, @duel_losses, @last_daily, @daily_streak, @last_fish, @last_rob)
     ON CONFLICT(user_id, guild_id) DO UPDATE SET
       xp           = excluded.xp,
       level        = excluded.level,
@@ -100,7 +119,9 @@ const stmts = {
       duel_wins    = excluded.duel_wins,
       duel_losses  = excluded.duel_losses,
       last_daily   = excluded.last_daily,
-      daily_streak = excluded.daily_streak
+      daily_streak = excluded.daily_streak,
+      last_fish    = excluded.last_fish,
+      last_rob     = excluded.last_rob
   `),
   getLeaderboard: db.prepare(`
     SELECT user_id, xp, level, duel_wins, duel_losses, title
@@ -197,10 +218,20 @@ const stmts = {
   removeShopItem: db.prepare(
     'DELETE FROM shop_items WHERE id = ? AND guild_id = ?'
   ),
+  // Achievements
+  getUnlockedAchievements: db.prepare(
+    'SELECT achievement_id, unlocked_at FROM user_achievements WHERE user_id = ? AND guild_id = ?'
+  ),
+  hasAchievement: db.prepare(
+    'SELECT 1 FROM user_achievements WHERE user_id = ? AND guild_id = ? AND achievement_id = ?'
+  ),
+  unlockAchievement: db.prepare(`
+    INSERT OR IGNORE INTO user_achievements (user_id, guild_id, achievement_id, unlocked_at)
+    VALUES (?, ?, ?, ?)
+  `),
 };
 
-// ─── Helper: convert plain object keys to @-prefixed for named params ────────
-// node-sqlite3-wasm requires { '@key': value } for named parameters.
+// ─── Helper: convert plain object keys to @-prefixed for named params ─────────
 function p(obj) {
   const out = {};
   for (const [k, v] of Object.entries(obj)) {
@@ -238,11 +269,17 @@ function _defaultUser(userId, guildId) {
     xp: 0, level: 0, title: null,
     duel_wins: 0, duel_losses: 0,
     last_daily: 0, daily_streak: 0,
+    last_fish: 0, last_rob: 0,
   };
 }
 
 function _saveUser(u) {
-  stmts.upsertUser.run(p(u));
+  // Ensure new fields have defaults if missing (for old user objects)
+  stmts.upsertUser.run(p({
+    ...u,
+    last_fish: u.last_fish || 0,
+    last_rob:  u.last_rob  || 0,
+  }));
 }
 
 // ─── Public API — Users ───────────────────────────────────────────────────────
@@ -261,10 +298,11 @@ function addXp(userId, guildId, amount) {
   const config     = getGuildConfig(guildId);
   const multiplier = config.xp_multiplier || 1.0;
   const user       = getUser(userId, guildId);
-  const newXp      = user.xp + Math.round(amount * multiplier);
-  const oldLevel   = user.level;
-  const newLevel   = calcLevel(newXp);
-
+  // Don't apply multiplier to negative XP (penalties)
+  const delta  = amount < 0 ? amount : Math.round(amount * multiplier);
+  const newXp  = Math.max(0, user.xp + delta);
+  const oldLevel = user.level;
+  const newLevel = calcLevel(newXp);
   _saveUser({ ...user, xp: newXp, level: newLevel });
   return { oldLevel, newLevel, totalXp: newXp };
 }
@@ -293,9 +331,7 @@ function buildProgressBar(current, needed, length = 20) {
   return '█'.repeat(Math.max(0, filled)) + '░'.repeat(Math.max(0, empty));
 }
 
-function getLeaderboard(guildId) {
-  return stmts.getLeaderboard.all([guildId]);
-}
+function getLeaderboard(guildId) { return stmts.getLeaderboard.all([guildId]); }
 
 function getUserRank(userId, guildId) {
   const row = stmts.getUserRank.get([guildId, userId, guildId]);
@@ -326,17 +362,14 @@ function setGuildConfig(guildId, updates) {
 
 // ─── Role Rewards ─────────────────────────────────────────────────────────────
 
-function getRoleRewards(guildId) {
-  return stmts.getRoleRewards.all([guildId]);
-}
+function getRoleRewards(guildId) { return stmts.getRoleRewards.all([guildId]); }
 
 function setRoleReward(guildId, level, roleId, roleName) {
   stmts.upsertRoleReward.run(p({ guild_id: guildId, level, role_id: roleId, role_name: roleName }));
 }
 
 function removeRoleReward(guildId, level) {
-  const r = stmts.deleteRoleReward.run([guildId, level]);
-  return r.changes > 0;
+  return stmts.deleteRoleReward.run([guildId, level]).changes > 0;
 }
 
 function getRoleRewardForLevel(guildId, level) {
@@ -355,9 +388,7 @@ function endVoiceSession(userId, guildId) {
   return session;
 }
 
-function getAllVoiceSessions() {
-  return stmts.getAllVoiceSessions.all();
-}
+function getAllVoiceSessions() { return stmts.getAllVoiceSessions.all(); }
 
 // ─── Duels ────────────────────────────────────────────────────────────────────
 
@@ -381,9 +412,7 @@ function resolveDuel(duelId, winnerId) {
   stmts.resolveDuel.run([winnerId, Date.now(), duelId]);
 }
 
-function cancelDuel(duelId) {
-  stmts.cancelDuel.run([duelId]);
-}
+function cancelDuel(duelId) { stmts.cancelDuel.run([duelId]); }
 
 function getDuelHistory(guildId, userId) {
   return stmts.getDuelHistory.all([guildId, userId, userId]);
@@ -395,10 +424,8 @@ function recordDuelResult(guildId, winnerId, loserId, wager) {
   const actualWager = Math.min(wager, loser.xp);
   const winnerNewXp = winner.xp + actualWager;
   const loserNewXp  = Math.max(0, loser.xp - actualWager);
-
   _saveUser({ ...winner, xp: winnerNewXp, level: calcLevel(winnerNewXp), duel_wins: (winner.duel_wins || 0) + 1 });
   _saveUser({ ...loser,  xp: loserNewXp,  level: calcLevel(loserNewXp),  duel_losses: (loser.duel_losses || 0) + 1 });
-
   return { actualWager, winnerNewXp, loserNewXp };
 }
 
@@ -421,30 +448,54 @@ function claimDaily(userId, guildId) {
   const now  = Date.now();
   const diff = now - (user.last_daily || 0);
 
-  if (diff < MS_PER_DAY) {
-    return { success: false, remaining: MS_PER_DAY - diff };
-  }
+  if (diff < MS_PER_DAY) return { success: false, remaining: MS_PER_DAY - diff };
 
-  const streak      = diff < MS_PER_DAY * 2 ? (user.daily_streak || 0) + 1 : 1;
+  const streak       = diff < MS_PER_DAY * 2 ? (user.daily_streak || 0) + 1 : 1;
   const cappedStreak = Math.min(streak, DAILY_STREAK_CAP);
-  const xpAwarded   = DAILY_BASE_XP + (cappedStreak - 1) * 25;
-  const newXp       = user.xp + xpAwarded;
-  const newLevel    = calcLevel(newXp);
+  const xpAwarded    = DAILY_BASE_XP + (cappedStreak - 1) * 25;
+  const newXp        = user.xp + xpAwarded;
+  const newLevel     = calcLevel(newXp);
 
   _saveUser({ ...user, xp: newXp, level: newLevel, last_daily: now, daily_streak: streak });
-
   return { success: true, xpAwarded, streak: cappedStreak, newXp, oldLevel: user.level, newLevel };
+}
+
+// ─── Fish Cooldown ────────────────────────────────────────────────────────────
+
+const FISH_COOLDOWN_MS = 30 * 60_000; // 30 minutes
+
+function canFish(userId, guildId) {
+  const user      = getUser(userId, guildId);
+  const lastFish  = user.last_fish || 0;
+  const remaining = FISH_COOLDOWN_MS - (Date.now() - lastFish);
+  return { can: remaining <= 0, remaining: Math.max(0, remaining) };
+}
+
+function setLastFish(userId, guildId) {
+  const user = getUser(userId, guildId);
+  _saveUser({ ...user, last_fish: Date.now() });
+}
+
+// ─── Rob Cooldown ─────────────────────────────────────────────────────────────
+
+const ROB_COOLDOWN_MS = 10 * 60_000; // 10 minutes
+
+function canRob(userId, guildId) {
+  const user      = getUser(userId, guildId);
+  const lastRob   = user.last_rob || 0;
+  const remaining = ROB_COOLDOWN_MS - (Date.now() - lastRob);
+  return { can: remaining <= 0, remaining: Math.max(0, remaining) };
+}
+
+function setLastRob(userId, guildId) {
+  const user = getUser(userId, guildId);
+  _saveUser({ ...user, last_rob: Date.now() });
 }
 
 // ─── Shop ─────────────────────────────────────────────────────────────────────
 
-function getShopItems(guildId) {
-  return stmts.getShopItems.all([guildId]);
-}
-
-function getShopItem(itemId, guildId) {
-  return stmts.getShopItem.get([itemId, guildId]);
-}
+function getShopItems(guildId) { return stmts.getShopItems.all([guildId]); }
+function getShopItem(itemId, guildId) { return stmts.getShopItem.get([itemId, guildId]); }
 
 function addShopItem(guildId, name, description, cost, itemType, itemValue) {
   return stmts.addShopItem.run(p({
@@ -459,24 +510,37 @@ function removeShopItem(itemId, guildId) {
 function buyShopItem(userId, guildId, itemId) {
   const user = getUser(userId, guildId);
   const item = getShopItem(itemId, guildId);
-
   if (!item) return { success: false, reason: 'Item not found.' };
-  if (user.xp < item.cost) {
-    return {
-      success: false,
-      reason: `You need **${item.cost.toLocaleString()} XP** but only have **${user.xp.toLocaleString()}**.`,
-    };
-  }
-
+  if (user.xp < item.cost) return {
+    success: false,
+    reason: `You need **${item.cost.toLocaleString()} XP** but only have **${user.xp.toLocaleString()}**.`,
+  };
   const newXp = user.xp - item.cost;
   _saveUser({
-    ...user,
-    xp:    newXp,
-    level: calcLevel(newXp),
+    ...user, xp: newXp, level: calcLevel(newXp),
     title: item.item_type === 'title' ? item.item_value : user.title,
   });
-
   return { success: true, item, newXp };
+}
+
+// ─── Achievements ─────────────────────────────────────────────────────────────
+
+function getUnlockedAchievements(userId, guildId) {
+  return stmts.getUnlockedAchievements.all([userId, guildId]); // [{achievement_id, unlocked_at}]
+}
+
+function hasAchievement(userId, guildId, achievementId) {
+  return !!stmts.hasAchievement.get([userId, guildId, achievementId]);
+}
+
+/**
+ * Unlock an achievement if not already unlocked.
+ * Returns true if newly unlocked, false if already had it.
+ */
+function unlockAchievement(userId, guildId, achievementId) {
+  if (hasAchievement(userId, guildId, achievementId)) return false;
+  stmts.unlockAchievement.run([userId, guildId, achievementId, Date.now()]);
+  return true;
 }
 
 // ─── Exports ──────────────────────────────────────────────────────────────────
@@ -492,7 +556,10 @@ module.exports = {
   resolveDuel, cancelDuel, getDuelHistory, recordDuelResult,
   getDuelCooldown, setDuelCooldown,
   claimDaily,
+  canFish, setLastFish, FISH_COOLDOWN_MS,
+  canRob,  setLastRob,  ROB_COOLDOWN_MS,
   getShopItems, getShopItem, addShopItem, removeShopItem, buyShopItem,
+  getUnlockedAchievements, hasAchievement, unlockAchievement,
   xpForLevel, totalXpForLevel, calcLevel,
   DAILY_BASE_XP, DAILY_STREAK_CAP, MS_PER_DAY,
 };
